@@ -1,6 +1,5 @@
 /build
 cache
-test/*.json
 wcc.exe.c
 
 node_modules
@@ -8,5 +7,4 @@ node_modules
 *err.js
 *stderr.json
 .cache
-*/spec/**/*output.js
 tmp

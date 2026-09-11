@@ -74,31 +74,7 @@ add_executable(wcsc
     src/utils/string_utils.cpp
     src/utils/file.cpp
     )
-# add_executable(
-#     resolve_path
-#     test/resolve_path.cpp
-#     src/wxml/dom_lib/common.cpp
-#     )
-add_executable(test1
-    test/test.cpp
-    )
-# add_executable(
-#     transit_table
-#     test/transit_table.cpp
-#     src/wxml/expr_lib/base.cpp
-#     src/wxml/expr_lib/bnf.cpp
-#     src/wxml/expr_lib/common.cpp
-#     src/wxml/expr_lib/expr_syntax_tree.cpp
-#     src/wxml/expr_lib/parser.cpp
-#     src/wxml/expr_lib/token.cpp
-#     src/wxml/expr_lib/tokenizer.cpp
-#     src/wxml/expr_lib/transit_table.cpp
-#     )
 
-enable_testing()
-add_test(transit_table_test
-    $<TARGET_FILE:transit_table>
-    )
 set(CPACK_PROJECT_NAME ${PROJECT_NAME})
 set(CPACK_PROJECT_VERSION ${PROJECT_VERSION})
 include(CPack)

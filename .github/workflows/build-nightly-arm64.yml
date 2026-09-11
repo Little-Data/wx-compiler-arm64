@@ -137,7 +137,6 @@ jobs:
           repository: little-Data/wx-compiler-arm64
           ref: ${{ env.COMPILER_REF }}
           path: wx-compiler
-          submodules: recursive
 
       - name: Install build dependencies
         run: |
@@ -219,7 +218,6 @@ jobs:
           repository: little-Data/wechat-web-devtools-linux-arm64
           ref: ${{ env.DEVTOOLS_REF }}
           path: devtools
-          submodules: recursive
 
       # 必须 >= Node 20.11：nodegit 的 acquireOpenSSL.mjs 使用 import.meta.dirname。
       - name: Set up Node.js (build host tooling)
@@ -254,9 +252,7 @@ jobs:
         working-directory: devtools
         run: |
           set -e
-          COMPILER_VERSION=$(node tools/parse-config.js --get-compiler-version)
-          echo "COMPILER_VERSION=$COMPILER_VERSION"
-          CACHE_DIR="cache/compiler/v${COMPILER_VERSION}"
+          CACHE_DIR="cache/compiler"
           mkdir -p "$CACHE_DIR"
           cp ../compiler-out/wcc-arm64       "$CACHE_DIR/wcc-arm64"
           cp ../compiler-out/wcsc-arm64      "$CACHE_DIR/wcsc-arm64"
@@ -275,8 +271,7 @@ jobs:
             const fs = require('fs');
             const p = 'conf/config.json';
             const c = JSON.parse(fs.readFileSync(p, 'utf8'));
-            c.devtools.version = process.env.NIGHTLY_VERSION;
-            c.devtools.template = process.env.NIGHTLY_URL;
+            c.devtools = { version: process.env.NIGHTLY_VERSION, template: process.env.NIGHTLY_URL };
             fs.writeFileSync(p, JSON.stringify(c, null, 4) + '\n');
             console.log('devtools.version  =', c.devtools.version);
             console.log('devtools.template =', c.devtools.template);
