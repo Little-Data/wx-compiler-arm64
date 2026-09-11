@@ -27,6 +27,10 @@ on:
         description: '是否发布 Release 到 wechat-web-devtools-linux-arm64（true/false，默认 true）'
         required: false
         default: 'true'
+      release_version:
+        description: '自定义 Release 版本号（仅影响 Release 的 tag/名称，其余不变；留空则用 v<开发者工具版本>）'
+        required: false
+        default: ''
 
 env:
   COMPILER_REF: ${{ github.event.inputs.compiler_ref || 'master' }}
@@ -422,12 +426,15 @@ jobs:
 
       - name: Create Pre-release in wechat-web-devtools-linux-arm64
         uses: softprops/action-gh-release@v3
+        env:
+          # 自定义版本号仅用于 Release 的 tag/名称，不影响构建产物与版本记录
+          RELEASE_TAG: ${{ startsWith(github.event.inputs.release_version, 'v') && github.event.inputs.release_version || format('v{0}', github.event.inputs.release_version || needs.check-stable.outputs.version) }}
         with:
           # 跨仓库发布需要具有目标仓库 contents:write 权限的 PAT
           repository: little-Data/wechat-web-devtools-linux-arm64
           token: ${{ secrets.RELEASE_TOKEN }}
-          tag_name: v${{ needs.check-stable.outputs.version }}
-          name: v${{ needs.check-stable.outputs.version }}
+          tag_name: ${{ env.RELEASE_TAG }}
+          name: ${{ env.RELEASE_TAG }}
           prerelease: true
           body_path: stable-meta/release_body.md
           files: |
