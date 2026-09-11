@@ -58,14 +58,14 @@ jobs:
       download_url: ${{ steps.check.outputs.download_url }}
     steps:
       - name: Checkout wx-compiler-arm64 (读取 nightly_version.txt)
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: little-Data/wx-compiler-arm64
           ref: ${{ env.COMPILER_REF }}
           path: self
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -115,7 +115,7 @@ jobs:
 
       - name: Upload 更新日志
         if: steps.check.outputs.should_build == 'true'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: nightly-version-note
           path: nightly_version_note.txt
@@ -132,7 +132,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout wx-compiler
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: little-Data/wx-compiler-arm64
           ref: ${{ env.COMPILER_REF }}
@@ -147,7 +147,7 @@ jobs:
             xz-utils wget ca-certificates
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -191,7 +191,7 @@ jobs:
           done
 
       - name: Upload compiler artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wx-compiler-arm64.build
           path: wx-compiler/compiler-out
@@ -214,7 +214,7 @@ jobs:
       npm_config_cache: ${{ github.workspace }}/devtools/cache/npm/node_cache
     steps:
       - name: Checkout wechat-web-devtools-linux
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: little-Data/wechat-web-devtools-linux-arm64
           ref: ${{ env.DEVTOOLS_REF }}
@@ -223,7 +223,7 @@ jobs:
 
       # 必须 >= Node 20.11：nodegit 的 acquireOpenSSL.mjs 使用 import.meta.dirname。
       - name: Set up Node.js (build host tooling)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -239,13 +239,13 @@ jobs:
           sudo ln -sf "$(command -v python3)" /usr/local/bin/python2
 
       - name: Download compiler artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wx-compiler-arm64.build
           path: compiler-out
 
       - name: Download nightly 更新日志
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: nightly-version-note
           path: nightly-note
@@ -348,7 +348,7 @@ jobs:
           ls -lh tmp/build
 
       - name: Upload nightly devtools artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wechat-devtools-nightly-arm64.build
           path: devtools/tmp/build/*
@@ -363,7 +363,7 @@ jobs:
     runs-on: ubuntu-22.04
     steps:
       - name: Checkout wx-compiler-arm64
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: little-Data/wx-compiler-arm64
           ref: ${{ env.COMPILER_REF }}

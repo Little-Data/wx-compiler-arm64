@@ -41,7 +41,7 @@ jobs:
     timeout-minutes: 120
     steps:
       - name: Checkout wx-compiler
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: little-Data/wx-compiler-arm64
           ref: ${{ env.COMPILER_REF }}
@@ -56,7 +56,7 @@ jobs:
             xz-utils wget ca-certificates
 
       - name: Set up Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -103,7 +103,7 @@ jobs:
           done
 
       - name: Upload compiler artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wx-compiler-arm64.build
           path: wx-compiler/compiler-out
@@ -126,7 +126,7 @@ jobs:
       npm_config_cache: ${{ github.workspace }}/devtools/cache/npm/node_cache
     steps:
       - name: Checkout wechat-web-devtools-linux
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           repository: little-Data/wechat-web-devtools-linux-arm64
           ref: ${{ env.DEVTOOLS_REF }}
@@ -137,7 +137,7 @@ jobs:
       # Node<20.11 会将其求值为 undefined，导致 path.join(undefined,...) 崩溃。
       # 目标原生模块 ABI 由 node-gyp 的 --target 决定，与宿主 node 版本无关。
       - name: Set up Node.js (build host tooling)
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v7
         with:
           node-version: '22'
 
@@ -156,7 +156,7 @@ jobs:
           sudo ln -sf "$(command -v python3)" /usr/local/bin/python2
 
       - name: Download compiler artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wx-compiler-arm64.build
           path: compiler-out
@@ -250,7 +250,7 @@ jobs:
           ls -lh tmp/build
 
       - name: Upload devtools artifact
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v7
         with:
           name: wechat-devtools-arm64.build
           path: devtools/tmp/build/*.tar.gz
@@ -267,13 +267,13 @@ jobs:
       contents: write
     steps:
       - name: Download devtools artifact
-        uses: actions/download-artifact@v4
+        uses: actions/download-artifact@v8
         with:
           name: wechat-devtools-arm64.build
           path: .
 
       - name: Create GitHub Release
-        uses: softprops/action-gh-release@v2
+        uses: softprops/action-gh-release@v3
         with:
           files: |
             *.tar.gz
