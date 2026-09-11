@@ -1,9 +1,10 @@
 name: Build WeChat DevTools (ARM64)
 
 on:
-  push:
-    tags:
-      - 'v*'
+  # 每天 UTC 03:00（北京时间 11:00）自动检查是否有新的稳定版。
+  # 版本与仓库根目录 stable_version.txt 记录一致时直接跳过，不触发构建。
+  schedule:
+    - cron: '0 3 * * *'
   workflow_dispatch:
     inputs:
       compiler_ref:
@@ -18,25 +19,142 @@ on:
         description: '构建 Skyline 的 arm64 插件（选择 true 启用，可选特性）'
         required: false
         default: 'true'
+      force:
+        description: '强制构建（忽略 stable_version.txt 中已记录的版本）'
+        required: false
+        default: 'false'
+      publish_release:
+        description: '是否发布 Release 到 wechat-web-devtools-linux-arm64（true/false，默认 true）'
+        required: false
+        default: 'true'
 
 env:
   COMPILER_REF: ${{ github.event.inputs.compiler_ref || 'master' }}
   DEVTOOLS_REF: ${{ github.event.inputs.devtools_ref || 'electron' }}
+  SKYLINE: ${{ github.event.inputs.skyline || 'true' }}
+  FORCE: ${{ github.event.inputs.force || 'false' }}
   BUILD_TYPE: Release
+  # 稳定版版本历史 / 更新日志接口（对应页面
+  # https://developers.weixin.qq.com/miniprogram/dev/devtools/log.html#stable 的动态数据源）
+  STABLE_API: https://devtools.wxqcloud.qq.com.cn/WechatWebDev/nightly/versions
+
+# 需要写权限把本次构建的版本号回写到 stable_version.txt。
+permissions:
+  contents: write
 
 # 说明：
+# 阶段0 检查最新稳定版：与仓库根目录 stable_version.txt 记录一致则跳过整个构建；
+#       不一致则从接口取真实 win32_x64 安装包链接与更新日志。
 # 阶段1 在原生 arm64 runner 上编译 wx-compiler，产出 aarch64 的 wcc/wcsc（及 .node 原生模块）。
-# 阶段2 在原生 arm64 runner 上用 wechat-web-devtools-linux 自身脚本组装出
-#       Electron 版微信开发者工具 arm64 包（electron/node/原生模块全部本地 arm64 编译）。
-# 阶段3 仅 tag 触发时发布 Release。
+# 阶段2 在原生 arm64 runner 上用 wechat-web-devtools-linux 自身脚本组装出 Electron 版
+#       微信开发者工具 arm64 包（以稳定版安装包作为资源来源），更新日志随产物一起上传。
+# 阶段3 默认将 wechat-devtools-arm64.build 产物以 Pre-release 发布到
+#       wechat-web-devtools-linux-arm64 仓库，tag 与微信开发者工具版本号一致（如 v2.02.2608070），
+#       发布说明来自数据来源；workflow_dispatch 可用 publish_release=false 关闭发布。
+# 阶段4 构建成功且发布成功（或已关闭发布）后把本次版本号写回 stable_version.txt。
 
 jobs:
+  # ─────────────────────────────────────────────
+  # 阶段0：检查稳定版版本
+  # ─────────────────────────────────────────────
+  check-stable:
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.check.outputs.version }}
+      download_url: ${{ steps.check.outputs.download_url }}
+    steps:
+      - name: Checkout wx-compiler-arm64 (读取 stable_version.txt)
+        uses: actions/checkout@v7
+        with:
+          repository: little-Data/wx-compiler-arm64
+          ref: ${{ env.COMPILER_REF }}
+          path: self
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v7
+        with:
+          node-version: '22'
+
+      - name: 检查稳定版版本并生成更新日志
+        id: check
+        run: |
+          set -euo pipefail
+          curl -fsSL "$STABLE_API/history_stable.json" -o stable_history.json
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('stable_history.json','utf8')).history[0].version")
+          LOG_FILE=$(node -p "JSON.parse(require('fs').readFileSync('stable_history.json','utf8')).history[0].log_file")
+          RECORDED=$(tr -d '[:space:]' < self/stable_version.txt 2>/dev/null || true)
+          echo "最新稳定版版本: $VERSION"
+          echo "已记录版本    : ${RECORDED:-<无>}"
+
+          if [ "$VERSION" = "$RECORDED" ] && [ "$FORCE" != "true" ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "版本未变化，跳过构建。"
+            exit 0
+          fi
+
+          curl -fsSL "$STABLE_API/$LOG_FILE" -o stable_log.json
+          # 必须使用 win32_x64 安装包
+          URL=$(node -p "const j=JSON.parse(require('fs').readFileSync('stable_log.json','utf8'));const d=j.downloads.find(x=>x.os==='Windows'&&x.arch==='64');d?d.url:''")
+          if [ -z "$URL" ]; then
+            echo "::error::未找到 win32_x64 安装包下载链接"
+            exit 1
+          fi
+          echo "安装包: $URL"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "download_url=$URL" >> "$GITHUB_OUTPUT"
+
+          # 生成产物内更新日志（纯文本，去掉 markdown 反引号）与 Release 说明（markdown）
+          cat > gen-meta.js <<'EOF'
+          const fs = require('fs');
+          const j = JSON.parse(fs.readFileSync('stable_log.json', 'utf8'));
+
+          const note = ['版本：' + j.version, '更新日期：' + j.update_time, ''];
+          for (const c of (j.categories || [])) {
+            note.push(c.title + ' ' + ((c.tag && c.tag.text) || ''));
+            for (const it of (c.items || [])) {
+              note.push(it.replace(/`/g, '').replace(/^\s*\d+\.\s*/, '').trim());
+            }
+          }
+          fs.writeFileSync('stable_version_note.txt', note.join('\n') + '\n');
+
+          const body = ['## 微信开发者工具 ' + j.version + ' (arm64 Linux)', ''];
+          if (j.update_time) body.push('更新日期：' + j.update_time, '');
+          if (j.desc) body.push(j.desc.trim(), '');
+          for (const c of (j.categories || [])) {
+            const tag = (c.tag && c.tag.text) ? ' `' + c.tag.text + '`' : '';
+            body.push('### ' + c.title + tag, '');
+            for (const it of (c.items || [])) {
+              body.push('- ' + it.replace(/^\s*\d+\.\s*/, '').trim());
+            }
+            body.push('');
+          }
+          fs.writeFileSync('release_body.md', body.join('\n') + '\n');
+          EOF
+          node gen-meta.js
+          echo "----- stable_version_note.txt -----"
+          cat stable_version_note.txt
+          echo "----- release_body.md -----"
+          cat release_body.md
+
+      - name: Upload 版本元数据
+        if: steps.check.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v7
+        with:
+          name: stable-meta
+          path: |
+            stable_version_note.txt
+            release_body.md
+          retention-days: 7
+
   # ─────────────────────────────────────────────
   # 阶段1：编译 wx-compiler (arm64)
   # ─────────────────────────────────────────────
   build-compiler:
+    needs: check-stable
+    if: needs.check-stable.outputs.should_build == 'true'
     # 原生 arm64 runner：确保 wcc/wcsc 可执行文件与 .node 插件全部为 aarch64。
-    # 此前用 x86 交叉编译，.node 实际产出为 x86-64，导致 arm64 真机无法加载。
     runs-on: ubuntu-24.04-arm
     timeout-minutes: 120
     steps:
@@ -58,6 +176,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
+          # 与 Electron 36.6.0 内置的 Node（22.16.0）保持一致
           node-version: '22'
 
       - name: Enable pnpm & install compiler toolchain deps
@@ -110,10 +229,11 @@ jobs:
           retention-days: 7
 
   # ─────────────────────────────────────────────
-  # 阶段2：组装 wechat-dev-tools (arm64)
+  # 阶段2：组装 wechat-dev-tools (arm64, stable)
   # ─────────────────────────────────────────────
   build-devtools:
-    needs: build-compiler
+    needs: [check-stable, build-compiler]
+    if: needs.check-stable.outputs.should_build == 'true'
     # 原生 arm64 runner：electron / node / 原生插件全部在 arm64 上本地编译，
     # 从根本上消除 x86 交叉编译产生的 x86-64 文件。
     runs-on: ubuntu-24.04-arm
@@ -121,6 +241,8 @@ jobs:
     env:
       ACTION_MODE: 'true'
       WINE: 'false'
+      STABLE_VERSION: ${{ needs.check-stable.outputs.version }}
+      STABLE_URL: ${{ needs.check-stable.outputs.download_url }}
       # 对应 build-with-docker.sh 里的环境，保证 node-gyp / asar 写入仓库内 cache
       npm_config_prefix: ${{ github.workspace }}/devtools/cache/npm/node_global
       npm_config_cache: ${{ github.workspace }}/devtools/cache/npm/node_cache
@@ -161,6 +283,12 @@ jobs:
           name: wx-compiler-arm64.build
           path: compiler-out
 
+      - name: Download 版本元数据
+        uses: actions/download-artifact@v8
+        with:
+          name: stable-meta
+          path: stable-meta
+
       - name: Inject wx-compiler into devtools build
         working-directory: devtools
         run: |
@@ -176,7 +304,24 @@ jobs:
           chmod +x "$CACHE_DIR/wcc-arm64" "$CACHE_DIR/wcsc-arm64"
           ls -lh "$CACHE_DIR"
 
-      - name: Build devtools (native arm64)
+      # 将 conf/config.json 的 devtools 版本/下载地址指向本次稳定版，
+      # update-wechat-devtools.sh 会据此下载真实的 win32_x64 安装包并解出 resources。
+      - name: Point devtools config to stable build
+        working-directory: devtools
+        run: |
+          set -e
+          node -e "
+            const fs = require('fs');
+            const p = 'conf/config.json';
+            const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+            c.devtools.version = process.env.STABLE_VERSION;
+            c.devtools.template = process.env.STABLE_URL;
+            fs.writeFileSync(p, JSON.stringify(c, null, 4) + '\n');
+            console.log('devtools.version  =', c.devtools.version);
+            console.log('devtools.template =', c.devtools.template);
+          "
+
+      - name: Build devtools (native arm64, stable)
         working-directory: devtools
         run: |
           export PATH="$PWD/cache/npm/node_global/bin:$PATH"
@@ -187,7 +332,7 @@ jobs:
       # 可选：从源码构建 Skyline 的 arm64 插件（上游只有 linux-x86_64 二进制）。
       # best-effort：失败仅打 ::warning，不阻断打包（Skyline 为可选特性）。
       - name: Build Skyline native addons (arm64, best-effort)
-        if: ${{ inputs.skyline == 'true' }}
+        if: env.SKYLINE == 'true'
         working-directory: devtools
         run: |
           export PATH="$PWD/cache/npm/node_global/bin:$PATH"
@@ -246,37 +391,86 @@ jobs:
             DEVTOOLS_VERSION=$(node tools/parse-config.js --get-devtools-version)
           fi
           echo "DEVTOOLS_VERSION=$DEVTOOLS_VERSION"
-          bash tools/build-tar.sh "v${DEVTOOLS_VERSION}-continuous" arm64
+          bash tools/build-tar.sh "v${DEVTOOLS_VERSION}" arm64
+          # 更新日志放入构建产物根目录，随 tarball 一起上传
+          cp ../stable-meta/stable_version_note.txt tmp/build/stable_version_note.txt
           ls -lh tmp/build
 
       - name: Upload devtools artifact
         uses: actions/upload-artifact@v7
         with:
           name: wechat-devtools-arm64.build
-          path: devtools/tmp/build/*.tar.gz
+          path: devtools/tmp/build/*
           retention-days: 30
 
   # ─────────────────────────────────────────────
-  # 阶段3：发布 Release（仅 tag 触发）
+  # 阶段3：发布 Pre-release 到 wechat-web-devtools-linux-arm64
   # ─────────────────────────────────────────────
   release:
-    needs: build-devtools
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [check-stable, build-devtools]
+    # 默认发布；workflow_dispatch 可传 publish_release=false 关闭。
+    # 用字符串比较：schedule 触发时 github.event.inputs 为空（null），null != 'false' 为 true。
+    if: needs.check-stable.outputs.should_build == 'true' && github.event.inputs.publish_release != 'false'
     runs-on: ubuntu-22.04
-    permissions:
-      contents: write
     steps:
       - name: Download devtools artifact
         uses: actions/download-artifact@v8
         with:
           name: wechat-devtools-arm64.build
-          path: .
+          path: dist
 
-      - name: Create GitHub Release
+      - name: Download 发布说明
+        uses: actions/download-artifact@v8
+        with:
+          name: stable-meta
+          path: stable-meta
+
+      - name: Create Pre-release in wechat-web-devtools-linux-arm64
         uses: softprops/action-gh-release@v3
         with:
+          # 跨仓库发布需要具有目标仓库 contents:write 权限的 PAT
+          repository: little-Data/wechat-web-devtools-linux-arm64
+          token: ${{ secrets.RELEASE_TOKEN }}
+          tag_name: v${{ needs.check-stable.outputs.version }}
+          name: v${{ needs.check-stable.outputs.version }}
+          prerelease: true
+          body_path: stable-meta/release_body.md
           files: |
-            *.tar.gz
-          generate_release_notes: true
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+            dist/*
+          fail_on_unmatched_files: true
+
+  # ─────────────────────────────────────────────
+  # 阶段4：记录本次构建的稳定版版本
+  # ─────────────────────────────────────────────
+  update-record:
+    needs: [check-stable, build-devtools, release]
+    # 构建成功且发布成功（或已关闭发布）时才记录版本；发布失败则跳过以便下次重试
+    if: |
+      always() &&
+      needs.check-stable.outputs.should_build == 'true' &&
+      needs.build-devtools.result == 'success' &&
+      (needs.release.result == 'success' || needs.release.result == 'skipped')
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout wx-compiler-arm64
+        uses: actions/checkout@v7
+        with:
+          repository: little-Data/wx-compiler-arm64
+          ref: ${{ env.COMPILER_REF }}
+          path: self
+
+      - name: 写回 stable_version.txt
+        working-directory: self
+        run: |
+          set -e
+          echo "${{ needs.check-stable.outputs.version }}" > stable_version.txt
+          cat stable_version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add stable_version.txt
+          if git diff --cached --quiet; then
+            echo "版本记录无变化"
+          else
+            git commit -m "chore(stable): 记录构建版本 ${{ needs.check-stable.outputs.version }}"
+            git push
+          fi
