@@ -1,0 +1,386 @@
+name: Build WeChat DevTools Nightly (ARM64)
+
+on:
+  # 每天 UTC 02:00（北京时间 10:00）自动检查是否有新的 nightly 版本。
+  # 版本与仓库根目录 nightly_version.txt 记录一致时直接跳过，不触发构建。
+  schedule:
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      compiler_ref:
+        description: 'wx-compiler ref (branch/tag/sha)'
+        required: false
+        default: 'master'
+      devtools_ref:
+        description: 'wechat-web-devtools-linux ref (has arm64 config)'
+        required: false
+        default: 'electron'
+      skyline:
+        description: '构建 Skyline 的 arm64 插件（选择 true 启用，可选特性）'
+        required: false
+        default: 'true'
+      force:
+        description: '强制构建（忽略 nightly_version.txt 中已记录的版本）'
+        required: false
+        default: 'false'
+
+env:
+  COMPILER_REF: ${{ github.event.inputs.compiler_ref || 'master' }}
+  DEVTOOLS_REF: ${{ github.event.inputs.devtools_ref || 'electron' }}
+  SKYLINE: ${{ github.event.inputs.skyline || 'true' }}
+  FORCE: ${{ github.event.inputs.force || 'false' }}
+  BUILD_TYPE: Release
+  # nightly 版本历史 / 更新日志接口（对应页面
+  # https://developers.weixin.qq.com/miniprogram/dev/devtools/log.html#nightly 的动态数据源）
+  NIGHTLY_API: https://devtools.wxqcloud.qq.com.cn/WechatWebDev/nightly/versions
+
+# 需要写权限把本次构建的版本号回写到 nightly_version.txt；本工作流不发布 Release。
+permissions:
+  contents: write
+
+# 说明：
+# 阶段0 检查最新 nightly 版本：与仓库根目录 nightly_version.txt 记录一致则跳过整个构建；
+#       不一致则从接口取真实的 win32_x64 安装包链接与更新日志。
+# 阶段1 在原生 arm64 runner 上编译 wx-compiler，产出 aarch64 的 wcc/wcsc（及 .node 原生模块）。
+# 阶段2 在原生 arm64 runner 上用 wechat-web-devtools-linux 自身脚本组装出 Electron 版
+#       微信开发者工具 arm64 包（以 nightly 安装包作为资源来源），更新日志随产物一起上传。
+# 阶段3 将本次构建的 nightly 版本写回 nightly_version.txt（不发布 Release）。
+
+jobs:
+  # ─────────────────────────────────────────────
+  # 阶段0：检查 nightly 版本
+  # ─────────────────────────────────────────────
+  check-nightly:
+    runs-on: ubuntu-22.04
+    outputs:
+      should_build: ${{ steps.check.outputs.should_build }}
+      version: ${{ steps.check.outputs.version }}
+      download_url: ${{ steps.check.outputs.download_url }}
+    steps:
+      - name: Checkout wx-compiler-arm64 (读取 nightly_version.txt)
+        uses: actions/checkout@v4
+        with:
+          repository: little-Data/wx-compiler-arm64
+          ref: ${{ env.COMPILER_REF }}
+          path: self
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: 检查 nightly 版本并生成更新日志
+        id: check
+        run: |
+          set -euo pipefail
+          curl -fsSL "$NIGHTLY_API/history_nightly.json" -o history.json
+          VERSION=$(node -p "JSON.parse(require('fs').readFileSync('history.json','utf8')).history[0].version")
+          LOG_FILE=$(node -p "JSON.parse(require('fs').readFileSync('history.json','utf8')).history[0].log_file")
+          RECORDED=$(tr -d '[:space:]' < self/nightly_version.txt 2>/dev/null || true)
+          echo "最新 nightly 版本: $VERSION"
+          echo "已记录版本      : ${RECORDED:-<无>}"
+
+          if [ "$VERSION" = "$RECORDED" ] && [ "$FORCE" != "true" ]; then
+            echo "should_build=false" >> "$GITHUB_OUTPUT"
+            echo "版本未变化，跳过构建。"
+            exit 0
+          fi
+
+          curl -fsSL "$NIGHTLY_API/$LOG_FILE" -o log.json
+          # 必须使用 win32_x64 安装包
+          URL=$(node -p "const j=JSON.parse(require('fs').readFileSync('log.json','utf8'));const d=j.downloads.find(x=>x.os==='Windows'&&x.arch==='64');d?d.url:''")
+          if [ -z "$URL" ]; then
+            echo "::error::未找到 win32_x64 安装包下载链接"
+            exit 1
+          fi
+          echo "安装包: $URL"
+          echo "should_build=true" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+          echo "download_url=$URL" >> "$GITHUB_OUTPUT"
+
+          # 生成更新日志（去掉 markdown 反引号），随构建产物上传
+          cat > gen-note.js <<'EOF'
+          const fs = require('fs');
+          const j = JSON.parse(fs.readFileSync('log.json', 'utf8'));
+          const out = ['版本：' + j.version, '更新日期：' + j.update_time, ''];
+          for (const c of (j.categories || [])) {
+            out.push(c.title + ' ' + ((c.tag && c.tag.text) || ''));
+            for (const it of (c.items || [])) out.push(it.replace(/`/g, ''));
+          }
+          process.stdout.write(out.join('\n') + '\n');
+          EOF
+          node gen-note.js > nightly_version_note.txt
+          echo "----- nightly_version_note.txt -----"
+          cat nightly_version_note.txt
+
+      - name: Upload 更新日志
+        if: steps.check.outputs.should_build == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: nightly-version-note
+          path: nightly_version_note.txt
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # 阶段1：编译 wx-compiler (arm64)
+  # ─────────────────────────────────────────────
+  build-compiler:
+    needs: check-nightly
+    if: needs.check-nightly.outputs.should_build == 'true'
+    # 原生 arm64 runner：确保 wcc/wcsc 可执行文件与 .node 插件全部为 aarch64。
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 120
+    steps:
+      - name: Checkout wx-compiler
+        uses: actions/checkout@v4
+        with:
+          repository: little-Data/wx-compiler-arm64
+          ref: ${{ env.COMPILER_REF }}
+          path: wx-compiler
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            cmake make pkg-config file \
+            xz-utils wget ca-certificates
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Enable pnpm & install compiler toolchain deps
+        working-directory: wx-compiler
+        run: |
+          corepack enable
+          pnpm install --no-frozen-lockfile
+          pnpm exec cmake-js --version
+
+      - name: Build wcc / wcsc / .node natively (aarch64)
+        working-directory: wx-compiler
+        run: |
+          cat > native-arm64.cmake <<'EOF'
+          set(CMAKE_SYSTEM_NAME Linux)
+          set(CMAKE_SYSTEM_PROCESSOR aarch64)
+          set(CMAKE_C_COMPILER gcc)
+          set(CMAKE_CXX_COMPILER g++)
+          EOF
+          cmake -S . -B build-arm64 \
+            -DCMAKE_TOOLCHAIN_FILE=$PWD/native-arm64.cmake \
+            -DCMAKE_BUILD_TYPE=Release \
+            -DTARGET_ARCH=arm64
+          cmake --build build-arm64 -j$(nproc) --target wcc wcsc wcc_module wcsc_module
+
+      - name: Collect & verify all artifacts are aarch64
+        working-directory: wx-compiler
+        run: |
+          set -e
+          mkdir -p compiler-out
+          cp build-arm64/wcc              compiler-out/wcc-arm64
+          cp build-arm64/wcsc             compiler-out/wcsc-arm64
+          cp build-arm64/wcc_module.node  compiler-out/wcc-arm64.node
+          cp build-arm64/wcsc_module.node compiler-out/wcsc-arm64.node
+          chmod +x compiler-out/wcc-arm64 compiler-out/wcsc-arm64
+          ls -lh compiler-out
+          for f in compiler-out/wcc-arm64 compiler-out/wcsc-arm64 \
+                   compiler-out/wcc-arm64.node compiler-out/wcsc-arm64.node; do
+            echo "== $f =="; file "$f"
+            file "$f" | grep -q 'aarch64' || { echo "::error::$f 不是 aarch64"; exit 1; }
+          done
+
+      - name: Upload compiler artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wx-compiler-arm64.build
+          path: wx-compiler/compiler-out
+          retention-days: 7
+
+  # ─────────────────────────────────────────────
+  # 阶段2：组装 wechat-dev-tools (arm64, nightly)
+  # ─────────────────────────────────────────────
+  build-devtools:
+    needs: [check-nightly, build-compiler]
+    if: needs.check-nightly.outputs.should_build == 'true'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 240
+    env:
+      ACTION_MODE: 'true'
+      WINE: 'false'
+      NIGHTLY_VERSION: ${{ needs.check-nightly.outputs.version }}
+      NIGHTLY_URL: ${{ needs.check-nightly.outputs.download_url }}
+      npm_config_prefix: ${{ github.workspace }}/devtools/cache/npm/node_global
+      npm_config_cache: ${{ github.workspace }}/devtools/cache/npm/node_cache
+    steps:
+      - name: Checkout wechat-web-devtools-linux
+        uses: actions/checkout@v4
+        with:
+          repository: little-Data/wechat-web-devtools-linux-arm64
+          ref: ${{ env.DEVTOOLS_REF }}
+          path: devtools
+          submodules: recursive
+
+      # 必须 >= Node 20.11：nodegit 的 acquireOpenSSL.mjs 使用 import.meta.dirname。
+      - name: Set up Node.js (build host tooling)
+        uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      - name: Install build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            build-essential cmake make pkg-config \
+            p7zip-full wget xz-utils file dpkg \
+            python3 python-is-python3 \
+            libssl-dev libssh2-1-dev libkrb5-dev zlib1g-dev \
+            libx11-dev libxkbfile-dev libxdamage-dev libpcre3-dev
+          sudo ln -sf "$(command -v python3)" /usr/local/bin/python2
+
+      - name: Download compiler artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wx-compiler-arm64.build
+          path: compiler-out
+
+      - name: Download nightly 更新日志
+        uses: actions/download-artifact@v4
+        with:
+          name: nightly-version-note
+          path: nightly-note
+
+      - name: Inject wx-compiler into devtools build
+        working-directory: devtools
+        run: |
+          set -e
+          COMPILER_VERSION=$(node tools/parse-config.js --get-compiler-version)
+          echo "COMPILER_VERSION=$COMPILER_VERSION"
+          CACHE_DIR="cache/compiler/v${COMPILER_VERSION}"
+          mkdir -p "$CACHE_DIR"
+          cp ../compiler-out/wcc-arm64       "$CACHE_DIR/wcc-arm64"
+          cp ../compiler-out/wcsc-arm64      "$CACHE_DIR/wcsc-arm64"
+          cp ../compiler-out/wcc-arm64.node  "$CACHE_DIR/wcc-arm64.node"
+          cp ../compiler-out/wcsc-arm64.node "$CACHE_DIR/wcsc-arm64.node"
+          chmod +x "$CACHE_DIR/wcc-arm64" "$CACHE_DIR/wcsc-arm64"
+          ls -lh "$CACHE_DIR"
+
+      # 将 conf/config.json 的 devtools 版本/下载地址指向本次 nightly，
+      # update-wechat-devtools.sh 会据此下载真实的 win32_x64 安装包并解出 resources。
+      - name: Point devtools config to nightly build
+        working-directory: devtools
+        run: |
+          set -e
+          node -e "
+            const fs = require('fs');
+            const p = 'conf/config.json';
+            const c = JSON.parse(fs.readFileSync(p, 'utf8'));
+            c.devtools.version = process.env.NIGHTLY_VERSION;
+            c.devtools.template = process.env.NIGHTLY_URL;
+            fs.writeFileSync(p, JSON.stringify(c, null, 4) + '\n');
+            console.log('devtools.version  =', c.devtools.version);
+            console.log('devtools.template =', c.devtools.template);
+          "
+
+      - name: Build devtools (native arm64, nightly)
+        working-directory: devtools
+        run: |
+          export PATH="$PWD/cache/npm/node_global/bin:$PATH"
+          bash tools/setup-wechat-devtools.sh --arch arm64
+
+      # 可选：从源码构建 Skyline 的 arm64 插件（best-effort，失败不阻断打包）。
+      - name: Build Skyline native addons (arm64, best-effort)
+        if: env.SKYLINE == 'true'
+        working-directory: devtools
+        run: |
+          export PATH="$PWD/cache/npm/node_global/bin:$PATH"
+          bash tools/cross/build-skyline-arm64.sh || \
+            echo "::warning::Skyline arm64 插件构建失败（不影响主构建）"
+
+      - name: Report architecture (aarch64, non-blocking)
+        working-directory: devtools
+        run: |
+          set +e
+          echo "== 关键二进制架构 =="
+          for f in electron/electron electron/node \
+                   resources/app.asar.unpacked/node_modules/wcc-exec/wcc \
+                   resources/app.asar.unpacked/node_modules/wcc-exec/wcsc \
+                   resources/app.asar.unpacked/node_modules/wcc-electron/build/Release/wcc.node \
+                   resources/app.asar.unpacked/node_modules/wcc-electron/build/Release/wcsc.node; do
+            if [ -f "$f" ]; then
+              if file "$f" | grep -q 'aarch64'; then
+                echo "OK    aarch64 : $f"
+              else
+                echo "::warning::$f 不是 aarch64：$(file "$f")"
+              fi
+            else
+              echo "::warning::文件不存在，跳过 $f"
+            fi
+          done
+          echo "== 扫描原生插件(.node)中的 Linux x86-64（报告，不阻断） =="
+          while IFS= read -r f; do
+            if file -L "$f" 2>/dev/null | grep -qE 'ELF.*x86-64'; then
+              echo "::error::发现 x86-64 ELF: $f"
+            fi
+          done < <(find resources/app.asar.unpacked/node_modules \
+                     electron node bin -type f -iname '*.node' 2>/dev/null)
+          echo "== 本地运行 arm64 node 校验 =="
+          "$PWD/electron/node" -p "process.arch + ' ' + process.version" || \
+            echo "::warning::无法本地运行 node（缺依赖），跳过运行态检查"
+          echo "== 架构报告结束（不阻断打包） =="
+          true
+
+      - name: Package nightly release tarball
+        working-directory: devtools
+        run: |
+          set -e
+          export PATH="$PWD/cache/npm/node_global/bin:$PATH"
+          if [ -f resources/app/package.json ]; then
+            DEVTOOLS_VERSION=$(node -p \
+              "JSON.parse(require('fs').readFileSync('resources/app/package.json','utf8')).version")
+          else
+            DEVTOOLS_VERSION=$(node tools/parse-config.js --get-devtools-version)
+          fi
+          echo "DEVTOOLS_VERSION=$DEVTOOLS_VERSION"
+          bash tools/build-tar.sh "v${DEVTOOLS_VERSION}-nightly" arm64
+          # 更新日志放入构建产物根目录，随 tarball 一起上传
+          cp ../nightly-note/nightly_version_note.txt tmp/build/nightly_version_note.txt
+          ls -lh tmp/build
+
+      - name: Upload nightly devtools artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wechat-devtools-nightly-arm64.build
+          path: devtools/tmp/build/*
+          retention-days: 30
+
+  # ─────────────────────────────────────────────
+  # 阶段3：记录本次构建的 nightly 版本（不发布 Release）
+  # ─────────────────────────────────────────────
+  update-record:
+    needs: [check-nightly, build-devtools]
+    if: needs.check-nightly.outputs.should_build == 'true'
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Checkout wx-compiler-arm64
+        uses: actions/checkout@v4
+        with:
+          repository: little-Data/wx-compiler-arm64
+          ref: ${{ env.COMPILER_REF }}
+          path: self
+
+      - name: 写回 nightly_version.txt
+        working-directory: self
+        run: |
+          set -e
+          echo "${{ needs.check-nightly.outputs.version }}" > nightly_version.txt
+          cat nightly_version.txt
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add nightly_version.txt
+          if git diff --cached --quiet; then
+            echo "版本记录无变化"
+          else
+            git commit -m "chore(nightly): 记录构建版本 ${{ needs.check-nightly.outputs.version }}"
+            git push
+          fi
