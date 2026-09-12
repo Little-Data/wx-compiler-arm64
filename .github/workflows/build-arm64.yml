@@ -339,6 +339,20 @@ jobs:
           bash tools/cross/build-skyline-arm64.sh || \
             echo "::warning::Skyline arm64 插件构建失败（不影响主构建）"
 
+      # 兜底：若前置步骤失败留下“解包”状态，这里重新打包，保证产物含 app.asar
+      # （否则 wcc/wcsc 等 unpacked 文件会缺失）。同时打印资源布局便于排查。
+      - name: Ensure app.asar is packed
+        working-directory: devtools
+        run: |
+          if [ -d resources/app ] && [ ! -f resources/app.asar ]; then
+            echo "::warning::resources/app 处于解包状态，重新打包"
+            bash tools/asar-helper.sh pack
+          fi
+          echo "== resources/ =="
+          ls -la resources/ | grep -E 'app' || true
+          echo "== app.asar.unpacked/node_modules (wcc*) =="
+          ls -la resources/app.asar.unpacked/node_modules/ 2>/dev/null | grep -i wcc || echo "(无 wcc)"
+
       # 只做架构报告，绝不阻断打包与后续步骤：set +e 关闭 errexit，结尾无条件成功。
       - name: Report architecture (aarch64, non-blocking)
         working-directory: devtools
