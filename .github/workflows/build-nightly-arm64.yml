@@ -230,7 +230,8 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             build-essential cmake make pkg-config \
-            p7zip-full wget xz-utils file dpkg \
+            p7zip-full wget curl unzip zip xz-utils file dpkg \
+            ninja-build \
             python3 python-is-python3 \
             libssl-dev libssh2-1-dev libkrb5-dev zlib1g-dev \
             libx11-dev libxkbfile-dev libxdamage-dev libpcre3-dev
