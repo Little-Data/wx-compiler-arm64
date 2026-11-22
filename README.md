@@ -1,5 +1,8 @@
 # 微信小程序编译器 Linux arm64 版本
 
+> [!WARNING]  
+> 本人无力维护此仓库，现已存档，也欢迎有能力的大佬接手此项目！
+
 [![Build WeChat DevTools (ARM64)](https://github.com/Little-Data/wx-compiler-arm64/actions/workflows/build-arm64.yml/badge.svg)](https://github.com/Little-Data/wx-compiler-arm64/actions/workflows/build-arm64.yml)
 [![Build WeChat DevTools Nightly (ARM64)](https://github.com/Little-Data/wx-compiler-arm64/actions/workflows/build-nightly-arm64.yml/badge.svg)](https://github.com/Little-Data/wx-compiler-arm64/actions/workflows/build-nightly-arm64.yml)
 
